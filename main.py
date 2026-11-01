@@ -24,12 +24,12 @@ def setup_argparse():
     Sets up the argument parser for the command-line interface.
     """
     parser = argparse.ArgumentParser(description="Creates a visual dependency graph showing how different permissions rely on each other.",
-                                     epilog="Example Usage: pa-permission-dependency-graph -d /path/to/permissions -o output.png")
+                                     epilog="Example Usage: python main.py -d /path/to/permissions -o output")
 
     parser.add_argument("-d", "--directory", dest="directory", required=True,
                         help="The directory to analyze permissions from.")
     parser.add_argument("-o", "--output", dest="output_file", required=True,
-                        help="The output file for the graph (e.g., output.png, output.pdf).")
+                        help="The output name for the graph, without a file extension (e.g., output). The format extension is appended when the graph is rendered, so -o output with format png writes output.png.")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose",
                         help="Enable verbose logging.")
     parser.add_argument("-f", "--format", dest="format", default="png",
@@ -39,7 +39,7 @@ def setup_argparse():
     return parser.parse_args()
 
 
-def get_file_permissions(directory: str) -> Dict[str, Set[str]]:
+def get_file_permissions(directory: str, verbose: bool = False) -> Dict[str, Set[str]]:
     """
     Retrieves the permissions for files within a directory.
     This is a simplified example and might need adjustment based on the actual permission retrieval mechanism.
@@ -91,7 +91,7 @@ def get_file_permissions(directory: str) -> Dict[str, Set[str]]:
 
                 permissions[file_path] = file_permissions
 
-                if args.verbose:
+                if verbose:
                     logging.info(f"Permissions for '{file_path}': {file_permissions}")
 
             except OSError as e:
@@ -112,26 +112,28 @@ def analyze_permission_dependencies(permissions: Dict[str, Set[str]]) -> Dict[st
         and the value is a list of permissions it depends on.  This is a simplified placeholder,
         a more nuanced implementation would examine the relationships between permissions.
     """
-    dependencies: Dict[str, List[str]] = defaultdict(list)
+    # The graph is built per resource: a node per file, plus one node
+    # per permission of that file, named "<file>: <permission>". The
+    # stated rules are applied to that file's own permissions: write
+    # depends on read, and execute depends on read and on write, in
+    # each of the owner, group, and others families. Edges are
+    # deduplicated.
+    raw: Dict[str, Set[str]] = defaultdict(set)
 
-    # Example dependency logic (replace with actual dependency analysis)
     for file_path, perms in permissions.items():
-        if "write_owner" in perms:
-            dependencies["write_owner"].append("read_owner") # Write depends on read
-        if "execute_owner" in perms:
-            dependencies["execute_owner"].append("read_owner") # Execute depends on read
-            dependencies["execute_owner"].append("write_owner")# Execute depends on write
-        if "write_group" in perms:
-            dependencies["write_group"].append("read_group")
-        if "execute_group" in perms:
-            dependencies["execute_group"].append("read_group")
-            dependencies["execute_group"].append("write_group")
-        if "write_others" in perms:
-            dependencies["write_others"].append("read_others")
-        if "execute_others" in perms:
-            dependencies["execute_others"].append("read_others")
-            dependencies["execute_others"].append("write_others")
+        for perm in perms:
+            raw[file_path].add(f"{file_path}: {perm}")
+        for family in ("owner", "group", "others"):
+            write_node = f"{file_path}: write_{family}"
+            read_node = f"{file_path}: read_{family}"
+            execute_node = f"{file_path}: execute_{family}"
+            if f"write_{family}" in perms:
+                raw[write_node].add(read_node)
+            if f"execute_{family}" in perms:
+                raw[execute_node].add(read_node)
+                raw[execute_node].add(write_node)
 
+    dependencies: Dict[str, List[str]] = {node: sorted(deps) for node, deps in raw.items()}
     return dependencies
 
 def detect_circular_dependencies(dependencies: Dict[str, List[str]]) -> List[List[str]]:
@@ -145,42 +147,39 @@ def detect_circular_dependencies(dependencies: Dict[str, List[str]]) -> List[Lis
         A list of circular dependency paths.
     """
 
-    def find_cycles(node, graph, visited, stack, cycles):
+    # Visited and stack are built over every node named on either
+    # side of the dependency map, so a node that appears only as a
+    # dependency value is still tracked and cannot raise a KeyError.
+    nodes = set(dependencies.keys())
+    for deps in dependencies.values():
+        nodes.update(deps)
+    visited = {node: False for node in nodes}
+    stack = {node: False for node in nodes}
+    cycles: List[List[str]] = []
+
+    def find_cycles(node, graph, path):
         visited[node] = True
         stack[node] = True
+        path.append(node)
 
-        for neighbor in graph[node]:
+        for neighbor in graph.get(node, []):
             if not visited[neighbor]:
-                find_cycles(neighbor, graph, visited, stack, cycles)
+                find_cycles(neighbor, graph, path)
             elif stack[neighbor]:
-                cycle = []
-                curr = node
-                cycle.append(curr)
-                while curr != neighbor:
-                    for k, v in graph.items():
-                        if neighbor in v and curr == k:
-                            curr = k
-                            cycle.append(curr)
-                            break
-                cycle.append(neighbor) # complete the cycle
-                cycle.reverse()
-                cycles.append(cycle)
+                start = path.index(neighbor)
+                cycles.append(path[start:] + [neighbor])
 
+        path.pop()
         stack[node] = False
-        return cycles
 
-
-    cycles = []
-    visited = {node: False for node in dependencies}
-    stack = {node: False for node in dependencies}
-    for node in dependencies:
+    for node in sorted(nodes):
         if not visited[node]:
-            cycles = find_cycles(node, dependencies, visited, stack, cycles)
+            find_cycles(node, dependencies, [])
 
     return cycles
 
 
-def create_dependency_graph(dependencies: Dict[str, List[str]], output_file: str, graph_format: str = "png", highlight_circular: bool = False) -> None:
+def create_dependency_graph(dependencies: Dict[str, List[str]], output_file: str, graph_format: str = "png", highlight_circular: bool = False):
     """
     Creates a visual dependency graph using graphviz.
 
@@ -203,6 +202,8 @@ def create_dependency_graph(dependencies: Dict[str, List[str]], output_file: str
             print("[!] Circular dependencies detected:")
             for cycle in circular_dependencies:
                 print(" -> ".join(cycle))
+        else:
+            print("No circular dependencies detected.")
 
             for cycle in circular_dependencies:
                 for i in range(len(cycle) - 1):
@@ -211,8 +212,9 @@ def create_dependency_graph(dependencies: Dict[str, List[str]], output_file: str
                 dot.edge(cycle[-1], cycle[0], color="red", penwidth="2.0") # close the cycle
 
     try:
-        dot.render(output_file, format=graph_format, cleanup=True)  # Create the graph image
-        logging.info(f"Graph created successfully: {output_file}")
+        rendered = dot.render(output_file, format=graph_format, cleanup=True)  # Create the graph image
+        logging.info(f"Graph created successfully: {rendered}")
+        return rendered
 
     except graphviz.backend.ExecutableNotFound as e:
         logging.error(f"Error: Graphviz executable not found.  Please ensure Graphviz is installed and in your PATH.  Details: {e}")
@@ -229,7 +231,6 @@ def main():
     """
     Main function to orchestrate the permission dependency graph generation.
     """
-    global args
     args = setup_argparse()
 
     if args.verbose:
@@ -243,11 +244,15 @@ def main():
         if not os.path.isdir(directory):
             raise ValueError(f"The specified directory '{directory}' does not exist.")
 
-        permissions = get_file_permissions(directory)
+        permissions = get_file_permissions(directory, verbose=args.verbose)
+        if not permissions:
+            print(f"Error: No files found in directory '{directory}'. No graph was generated.")
+            logging.error(f"No files found in directory '{directory}'.")
+            sys.exit(1)
         dependencies = analyze_permission_dependencies(permissions)
-        create_dependency_graph(dependencies, output_file, output_format, args.detect_circular)
+        rendered = create_dependency_graph(dependencies, output_file, output_format, args.detect_circular)
 
-        print(f"Permission dependency graph generated successfully at {output_file}")
+        print(f"Permission dependency graph generated successfully at {rendered}")
 
     except ValueError as e:
         logging.error(e)
@@ -262,10 +267,10 @@ def main():
 
 if __name__ == "__main__":
     # Example Usage:
-    # pa-permission-dependency-graph -d /path/to/your/directory -o output.png
-    # pa-permission-dependency-graph -d /path/to/your/directory -o output.pdf -f pdf
-    # pa-permission-dependency-graph -d /path/to/your/directory -o output.png -v # verbose
-    # pa-permission-dependency-graph -d /path/to/your/directory -o output.png --detect-circular
+    # python main.py -d /path/to/your/directory -o output
+    # python main.py -d /path/to/your/directory -o output -f pdf
+    # python main.py -d /path/to/your/directory -o output -v # verbose
+    # python main.py -d /path/to/your/directory -o output --detect-circular
     # Create a sample directory structure for testing
     # os.makedirs("sample_dir/subdir", exist_ok=True)
     # open("sample_dir/file1.txt", "a").close()
