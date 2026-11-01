@@ -56,6 +56,9 @@ def get_file_permissions(directory: str, verbose: bool = False) -> Dict[str, Set
         logging.error(f"Error: '{directory}' is not a valid directory.")
         raise ValueError(f"'{directory}' is not a valid directory.")
 
+    # Directories never enter the map at all. An empty directory, and
+    # the directory entries themselves, leave no trace in the graph, so
+    # the picture is files only even though the walk passes every folder.
     for root, _, files in os.walk(directory):
         for file in files:
             file_path = os.path.join(root, file)
@@ -129,6 +132,10 @@ def analyze_permission_dependencies(permissions: Dict[str, Set[str]]) -> Dict[st
             execute_node = f"{file_path}: execute_{family}"
             if f"write_{family}" in perms:
                 raw[write_node].add(read_node)
+            # Both edges are added whenever execute exists, even when
+            # this file has no write permission in that family. The
+            # render step then draws a write node the file never had,
+            # as a dependency of its execute node.
             if f"execute_{family}" in perms:
                 raw[execute_node].add(read_node)
                 raw[execute_node].add(write_node)
@@ -202,6 +209,10 @@ def create_dependency_graph(dependencies: Dict[str, List[str]], output_file: str
             print("[!] Circular dependencies detected:")
             for cycle in circular_dependencies:
                 print(" -> ".join(cycle))
+        # The red edge drawing sits in this no cycles branch, where the
+        # loop over circular_dependencies runs over an empty list. When
+        # cycles are found above I print them and draw nothing, so the
+        # highlight flag never actually colours an edge.
         else:
             print("No circular dependencies detected.")
 
